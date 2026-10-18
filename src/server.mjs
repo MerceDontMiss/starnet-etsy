@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 
 export const challenge = v => crypto.createHash('sha256').update(v).digest('base64url');
 const random = () => crypto.randomBytes(32).toString('base64url');
+const protocolVersions = ['2025-03-26', '2025-06-18', '2025-11-25'];
 const equal = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 export function seal(value, key) {
   const iv = crypto.randomBytes(12), cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
@@ -102,6 +103,7 @@ export function createApp(c, fetcher = fetch) {
     return api('PATCH',`/listings/${a.listing_id}`,new URLSearchParams({state:'active'}));
   }
   const send = (res,status,data,headers={}) => {
+    if (status >= 400) console.warn(`Request rejected (${status}): ${typeof data?.error === 'string' ? data.error : data?.error?.message || 'Request failed'}`);
     res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer',...headers});
     res.end(data === undefined ? undefined : JSON.stringify(data));
   };
@@ -152,15 +154,16 @@ export function createApp(c, fetcher = fetch) {
       if (!authorized(req,c.mcp)) return send(res,401,{error:'Unauthorized'},{'WWW-Authenticate':'Bearer'});
       if (req.method !== 'POST') return send(res,405,{error:'Use POST'},{Allow:'POST'});
       if (!req.headers['content-type']?.startsWith('application/json')) return send(res,415,{error:'JSON required'});
-      if (req.headers['mcp-protocol-version'] && req.headers['mcp-protocol-version'] !== '2025-03-26') return send(res,400,{error:'Unsupported protocol version'});
       let chunks=[],size=0;
       for await (const chunk of req) {size+=chunk.length;if(size>8_000_000) {send(res,413,{error:'Request too large'});return;} chunks.push(chunk);}
       let m; try {m=JSON.parse(Buffer.concat(chunks));} catch {return send(res,400,{jsonrpc:'2.0',id:null,error:{code:-32700,message:'Parse error'}});}
       if (!m || Array.isArray(m) || m.jsonrpc !== '2.0' || typeof m.method !== 'string' || ('id' in m && typeof m.id !== 'string' && typeof m.id !== 'number')) return send(res,400,{jsonrpc:'2.0',id:null,error:{code:-32600,message:'Invalid request'}});
+      // Negotiate initialization from its body, before enforcing subsequent headers.
+      if (m.method !== 'initialize' && req.headers['mcp-protocol-version'] && !protocolVersions.includes(req.headers['mcp-protocol-version'])) return send(res,400,{error:'Unsupported protocol version'});
       if (!('id' in m)) return send(res,202);
       let result;
       switch(m.method) {
-        case 'initialize': result={protocolVersion:'2025-03-26',capabilities:{tools:{}},serverInfo:{name:'etsy-starnet',version:'1.0.0'}};break;
+        case 'initialize': result={protocolVersion:protocolVersions.includes(m.params?.protocolVersion) ? m.params.protocolVersion : protocolVersions.at(-1),capabilities:{tools:{}},serverInfo:{name:'etsy-starnet',version:'1.0.1'}};break;
         case 'ping': result={};break;
         case 'tools/list': result={tools:Object.entries(schemas).map(([name,inputSchema])=>({name,inputSchema,description:({etsy_status:'Check connection',etsy_create_draft:'Create physical listing draft. Creates a new listing on every call.',etsy_upload_image:'Upload JPEG or PNG to a listing',etsy_publish_listing:'Activate a listing; incurs Etsy fees. Requires operator opt-in.'})[name]}))};break;
         case 'tools/call':
