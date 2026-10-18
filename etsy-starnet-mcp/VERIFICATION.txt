@@ -1,0 +1,18 @@
+Rebuilt 2026-10-18
+
+Original /mnt/data starter ZIP and README: absent in this environment.
+Source: newly rebuilt replacement; no previously shared credentials included.
+Runtime checked: Node.js v22.18.0.
+node --test: 2 test suites passed, 0 failures.
+Includes HTTP integration tests with mocked Etsy responses, PKCE RFC vector,
+AES-GCM tamper rejection, auth/origin denial, callback cookies/state/replay,
+encrypted persistence, refresh, listing request construction and publish opt-in.
+Windows sandbox required TEST_TMP_DIR to point to the workspace scratch directory.
+
+Archive validation: CRC test, safe paths, UTF-8 source decoding, byte-for-byte
+comparison against source, and tests from fresh extraction performed at packaging.
+See adjacent SHA256 file for the completed archive's checksum.
+
+Not live-tested: Render deployment, Docker, real Etsy sign-in/publication,
+or the specific StarNet connector UI. See RENDER-SETUP.md for deployment
+and README.md for supported transport/authentication and limitations.

@@ -1,0 +1,61 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import {createApp,seal,unseal,challenge,config} from '../src/server.mjs';
+
+test('PKCE RFC 7636 vector and authenticated encryption tamper detection',()=>{
+  assert.equal(challenge('dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk'),'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM');
+  const key=crypto.randomBytes(32), data=seal({refresh_token:'private'},key);
+  assert.deepEqual(unseal(data,key),{refresh_token:'private'});
+  data[30]^=1;assert.throws(()=>unseal(data,key));
+  assert.throws(()=>config({}));
+});
+test('HTTP authorization, PKCE callback, encrypted persistence, refresh and listing tools',async t=>{
+  const dir=await fs.mkdtemp(path.join(process.env.TEST_TMP_DIR || os.tmpdir(),'etsy-test-'));
+  const c={origin:'https://etsy.example.com',client:'test-client',secret:'test-secret',shop:'123',mcp:'m'.repeat(43),admin:'a'.repeat(43),key:crypto.randomBytes(32),file:path.join(dir,'tokens.enc'),publish:false,port:0};
+  const calls=[];
+  const fetcher=async(url,opts)=>{
+    calls.push({url,opts});
+    if(url.endsWith('/oauth/token')) return Response.json({access_token:'456.test-access',refresh_token:'test-refresh',expires_in:0});
+    if(url.endsWith('/users/456/shops')) return Response.json({shop_id:123});
+    return Response.json({listing_id:789,state:opts.method==='PATCH'?'active':'draft'});
+  };
+  const server=createApp(c,fetcher);await new Promise(r=>server.listen(0,'127.0.0.1',r));
+  c.port=server.address().port;
+  const base='http://127.0.0.1:'+server.address().port;
+  t.after(async()=>{await new Promise(r=>server.close(r));await fs.rm(dir,{recursive:true,force:true});});
+  const request=(suffix,opts={})=>fetch(base+suffix,{...opts,headers:{Host:'etsy.example.com',...opts.headers}});
+  const rpc=async(method,params={},token=c.mcp)=>{
+    const r=await request('/mcp',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json',Accept:'application/json, text/event-stream'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});
+    return {status:r.status,data:await r.json()};
+  };
+  assert.equal((await rpc('initialize',{},'bad')).status,401);
+  assert.equal((await request('/mcp',{method:'POST',headers:{Origin:'https://evil.example'}})).status,403);
+  assert.equal((await rpc('initialize')).data.result.protocolVersion,'2025-03-26');
+  assert.equal((await rpc('tools/list')).data.result.tools.length,4);
+  assert.equal((await request('/admin/connect',{method:'POST'})).status,401);
+  const start=await request('/admin/connect',{method:'POST',headers:{Authorization:'Bearer '+c.admin}});
+  const cookie=start.headers.get('set-cookie').split(';')[0], url=new URL((await start.json()).authorization_url);
+  assert.equal(url.searchParams.get('code_challenge_method'),'S256');
+  const callback='/oauth/callback?code=test-code&state='+url.searchParams.get('state');
+  assert.equal((await request(callback)).status,400);
+  assert.equal((await request(callback,{headers:{Cookie:cookie}})).status,200);
+  assert.equal((await request(callback,{headers:{Cookie:cookie}})).status,400);
+  const stored=await fs.readFile(c.file);assert.equal(stored.includes(Buffer.from('test-refresh')),false);
+  assert.equal(unseal(stored,c.key).refresh_token,'test-refresh');
+  const grant=new URLSearchParams(calls[0].opts.body);assert.equal(challenge(grant.get('code_verifier')),url.searchParams.get('code_challenge'));
+  const args={quantity:1,title:'Test item',description:'Description',price:12.5,who_made:'i_did',when_made:'made_to_order',taxonomy_id:1,shipping_profile_id:2,readiness_state_id:3};
+  assert.equal((await rpc('tools/call',{name:'etsy_create_draft',arguments:args})).data.result.isError,undefined);
+  assert.ok(calls.some(x=>x.url.endsWith('/oauth/token') && x.opts.body.get('grant_type')==='refresh_token'));
+  const listing=calls.find(x=>x.url.endsWith('/listings'));
+  assert.equal(listing.opts.headers['x-api-key'],'test-client:test-secret');assert.equal(listing.opts.body.get('price'),'12.5');
+  assert.equal((await rpc('tools/call',{name:'etsy_create_draft',arguments:{...args,state:'active'}})).data.result.isError,true);
+  assert.equal((await rpc('tools/call',{name:'etsy_upload_image',arguments:{listing_id:789,image_base64:'invalid'}})).data.result.isError,true);
+  assert.equal((await rpc('tools/call',{name:'etsy_publish_listing',arguments:{listing_id:789}})).data.result.isError,true);
+  c.publish=true;
+  assert.equal((await rpc('tools/call',{name:'etsy_publish_listing',arguments:{listing_id:789}})).data.result.isError,undefined);
+  assert.equal(calls.at(-1).opts.body.get('state'),'active');
+});
