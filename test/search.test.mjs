@@ -17,14 +17,14 @@ async function fixture(t,fetcher) {
   };
   return {rpc,c};
 }
-test('five tools discovered; keyword search is read-only, fixed-route and independent of shop OAuth',async t=>{
+test('shop verification reads and keyword search are discovered; marketplace search stays independent of shop OAuth',async t=>{
   const calls=[];
   const {rpc,c}=await fixture(t,async(url,opts)=>{
     calls.push({url,opts});
     return Response.json({count:1,results:[{listing_id:99,shop_id:42,title:'Printed mug',listing_type:'physical',description:'Long '.repeat(1000),rich_description:'Unneeded '.repeat(1000),skus:['PUBLIC-EXAMPLE'],item_length:12,item_width:8,item_height:10,item_dimensions_unit:'cm',price:{amount:2500,divisor:100,currency_code:'USD'}}]});
   });
   const tools=(await rpc('tools/list')).tools;
-  assert.deepEqual(tools.map(x=>x.name).sort(),['etsy_status','etsy_create_draft','etsy_upload_image','etsy_publish_listing','etsy_search_marketplace'].sort());
+  assert.deepEqual(tools.map(x=>x.name).sort(),['etsy_status','etsy_create_draft','etsy_upload_image','etsy_publish_listing','etsy_search_marketplace','etsy_list_shop_listings','etsy_get_listing','etsy_get_listing_inventory','etsy_get_listing_images','etsy_get_shipping_profiles','etsy_get_readiness_states','etsy_get_production_partners'].sort());
   assert.equal(tools.find(x=>x.name==='etsy_search_marketplace').annotations.readOnlyHint,true);
   const call=arguments_=>rpc('tools/call',{name:'etsy_search_marketplace',arguments:arguments_});
   const first=await call({keywords:' floral mug & gifts ',offset:0});
