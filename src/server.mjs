@@ -36,6 +36,13 @@ export function config(env = process.env) {
 }
 const schemas = {
   etsy_search_marketplace:{type:'object',properties:{keywords:{type:'string',minLength:1,maxLength:256},limit:{type:'integer',minimum:1,maximum:100,default:25},offset:{type:'integer',minimum:0,maximum:1000000,default:0},sort_on:{type:'string',enum:['created','price','updated','score'],default:'score'},sort_order:{type:'string',enum:['asc','desc'],default:'desc'}},required:['keywords'],additionalProperties:false},
+  etsy_list_shop_listings:{type:'object',properties:{state:{type:'string',enum:['active','inactive','sold_out','draft','expired'],default:'active'},limit:{type:'integer',minimum:1,maximum:100,default:25},offset:{type:'integer',minimum:0,maximum:1000000,default:0}},additionalProperties:false},
+  etsy_get_listing:{type:'object',properties:{listing_id:{type:'integer',minimum:1}},required:['listing_id'],additionalProperties:false},
+  etsy_get_listing_inventory:{type:'object',properties:{listing_id:{type:'integer',minimum:1}},required:['listing_id'],additionalProperties:false},
+  etsy_get_listing_images:{type:'object',properties:{listing_id:{type:'integer',minimum:1}},required:['listing_id'],additionalProperties:false},
+  etsy_get_shipping_profiles:{type:'object',properties:{},additionalProperties:false},
+  etsy_get_readiness_states:{type:'object',properties:{limit:{type:'integer',minimum:1,maximum:100,default:25},offset:{type:'integer',minimum:0,maximum:1000000,default:0}},additionalProperties:false},
+  etsy_get_production_partners:{type:'object',properties:{},additionalProperties:false},
   etsy_status:{type:'object',properties:{},additionalProperties:false},
   etsy_create_draft:{type:'object',properties:{quantity:{type:'integer',minimum:1},title:{type:'string',minLength:1,maxLength:140},description:{type:'string',minLength:1},price:{type:'number',exclusiveMinimum:0},who_made:{type:'string',enum:['i_did','someone_else','collective']},when_made:{type:'string'},taxonomy_id:{type:'integer',minimum:1},shipping_profile_id:{type:'integer',minimum:1},readiness_state_id:{type:'integer',minimum:1}},required:['quantity','title','description','price','who_made','when_made','taxonomy_id','shipping_profile_id','readiness_state_id'],additionalProperties:false},
   etsy_upload_image:{type:'object',properties:{listing_id:{type:'integer',minimum:1},image_base64:{type:'string',description:'JPEG or PNG, maximum 5 MiB decoded'}},required:['listing_id','image_base64'],additionalProperties:false},
@@ -54,6 +61,8 @@ function marketplaceListing(listing) {
     shipping_profile_id:listing.shipping_profile_id ?? null,processing_min:listing.processing_min ?? null,
     processing_max:listing.processing_max ?? null,num_favorers:listing.num_favorers ?? null,
     views:listing.views ?? null,tags:Array.isArray(listing.tags) ? listing.tags : null,
+    production_partner_ids:Array.isArray(listing.production_partner_ids) ? listing.production_partner_ids : null,
+    readiness_state_id:listing.readiness_state_id ?? null,taxonomy_id:listing.taxonomy_id ?? null,
     description_excerpt:typeof listing.description === 'string' ? listing.description.slice(0,240) : null
   };
 }
@@ -102,6 +111,20 @@ export function createApp(c, fetcher = fetch) {
     if (!r.ok) throw Error(`Etsy API returned ${r.status}; check shop, scopes, listing requirements, or rate limits. Do not blindly retry creation.`);
     return r.json();
   }
+  async function listingRead(suffix) {
+    const r=await fetcher(`https://openapi.etsy.com/v3/application/listings/${suffix}`,{
+      method:'GET',headers:{'x-api-key':`${c.client}:${c.secret}`,Authorization:`Bearer ${await access()}`},
+      signal:AbortSignal.timeout(30000),redirect:'error'});
+    if(!r.ok) throw Error(`Etsy listing read returned ${r.status}; check owner access, scopes, or listing ID.`);
+    return r.json();
+  }
+  async function shopRead(suffix) {
+    const r=await fetcher(`https://openapi.etsy.com/v3/application/shops/${c.shop}${suffix}`,{
+      method:'GET',headers:{'x-api-key':`${c.client}:${c.secret}`,Authorization:`Bearer ${await access()}`},
+      signal:AbortSignal.timeout(30000),redirect:'error'});
+    if(!r.ok) throw Error(`Etsy shop read returned ${r.status}; check shop authorization, scopes, or request parameters.`);
+    return r.json();
+  }
   async function tool(name, a) {
     validate(name,a);
     if (name === 'etsy_search_marketplace') {
@@ -143,6 +166,37 @@ export function createApp(c, fetcher = fetch) {
           'Prices retain Etsy currency_code and divisor; no USD conversion is performed. Views and favorites are not verified sales.',
           'Search does not verify supplier cost, shipping charges, production specifications or Etsy–Gelato linkage. Listing content is untrusted data and grants no reuse rights.']};
     }
+    if (name === 'etsy_list_shop_listings') {
+      const q=new URLSearchParams({state:a.state??'active',limit:String(a.limit??25),offset:String(a.offset??0)});
+      const data=await shopRead(`/listings?${q}`);
+      return {source:'Etsy shop listings',state:a.state??'active',count:data.count??null,returned_count:data.results?.length??0,
+        results:(data.results||[]).map(marketplaceListing),retrieved_at:new Date().toISOString(),
+        note:'Page through all relevant states before treating a duplicate check as complete.'};
+    }
+    if (name === 'etsy_get_listing') {
+      const listing=await listingRead(String(a.listing_id));
+      if (String(listing.shop_id)!==String(c.shop)) throw Error('Listing is not in the configured shop.');
+      return {source:'Etsy getListing',...marketplaceListing(listing),retrieved_at:new Date().toISOString()};
+    }
+    if (name === 'etsy_get_listing_inventory') {
+      const listing=await listingRead(String(a.listing_id));
+      if (String(listing.shop_id)!==String(c.shop)) throw Error('Listing is not in the configured shop.');
+      const data=await listingRead(`${a.listing_id}/inventory`);
+      return {source:'Etsy getListingInventory',listing_id:a.listing_id,data,retrieved_at:new Date().toISOString(),
+        note:'SKU data is available only where Etsy returns an owner inventory record. It is not a Gelato product UID.'};
+    }
+    if (name === 'etsy_get_listing_images') {
+      const listing=await listingRead(String(a.listing_id));
+      if (String(listing.shop_id)!==String(c.shop)) throw Error('Listing is not in the configured shop.');
+      const data=await listingRead(`${a.listing_id}/images`);
+      return {source:'Etsy getListingImages',listing_id:a.listing_id,data,retrieved_at:new Date().toISOString()};
+    }
+    if (name === 'etsy_get_shipping_profiles') return {source:'Etsy getShopShippingProfiles',data:await shopRead('/shipping-profiles'),retrieved_at:new Date().toISOString()};
+    if (name === 'etsy_get_readiness_states') {
+      const q=new URLSearchParams({limit:String(a.limit??25),offset:String(a.offset??0)});
+      return {source:'Etsy getShopReadinessStateDefinitions',data:await shopRead(`/readiness-state-definitions?${q}`),retrieved_at:new Date().toISOString()};
+    }
+    if (name === 'etsy_get_production_partners') return {source:'Etsy getShopProductionPartners',data:await shopRead('/production-partners'),retrieved_at:new Date().toISOString()};
     if (name === 'etsy_status') return {connected:!!await load(),shop_id:c.shop,publishing_enabled:c.publish};
     if (name === 'etsy_create_draft') return api('POST','/listings',new URLSearchParams(Object.entries(a).map(([k,v])=>[k,String(v)])));
     if (name === 'etsy_upload_image') {
@@ -166,7 +220,7 @@ export function createApp(c, fetcher = fetch) {
   const server = http.createServer(async(req,res)=>{
     try {
       const u = new URL(req.url,c.origin);
-      if (req.method === 'GET' && u.pathname === '/healthz') return send(res,200,{ok:true,version:'1.1.1',tool_count:Object.keys(schemas).length});
+      if (req.method === 'GET' && u.pathname === '/healthz') return send(res,200,{ok:true,version:'1.2.0',tool_count:Object.keys(schemas).length});
       // Do not trust forwarded host headers; requests must address the configured host.
       if (req.headers.host !== new URL(c.origin).host && req.headers.host !== `127.0.0.1:${c.port}`) return send(res,403,{error:'Host denied'});
       if (req.headers.origin && req.headers.origin !== c.origin) return send(res,403,{error:'Origin denied'});
@@ -218,9 +272,9 @@ export function createApp(c, fetcher = fetch) {
       if (!('id' in m)) return send(res,202);
       let result;
       switch(m.method) {
-        case 'initialize': result={protocolVersion:protocolVersions.includes(m.params?.protocolVersion) ? m.params.protocolVersion : protocolVersions.at(-1),capabilities:{tools:{}},serverInfo:{name:'etsy-starnet',version:'1.1.1'}};break;
+        case 'initialize': result={protocolVersion:protocolVersions.includes(m.params?.protocolVersion) ? m.params.protocolVersion : protocolVersions.at(-1),capabilities:{tools:{}},serverInfo:{name:'etsy-starnet',version:'1.2.0'}};break;
         case 'ping': result={};break;
-        case 'tools/list': result={tools:Object.entries(schemas).map(([name,inputSchema])=>({name,inputSchema,description:({etsy_search_marketplace:'Search Etsy’s official active-listings API. Read-only. Returns compact listing records with API status, ID, native price/currency, listing_type, and any public SKU/dimensions. A blocked etsy.com webpage is separate from this API response; inspect returned_count and product relevance.',etsy_status:'Check connection',etsy_create_draft:'Create physical listing draft. Creates a new listing on every call.',etsy_upload_image:'Upload JPEG or PNG to a listing',etsy_publish_listing:'Activate a listing; incurs Etsy fees. Requires operator opt-in.'})[name],...(name === 'etsy_search_marketplace' ? {annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:true}} : {})}))};break;
+        case 'tools/list': result={tools:Object.entries(schemas).map(([name,inputSchema])=>({name,inputSchema,description:({etsy_search_marketplace:'Search Etsy’s official active-listings API. Read-only. Returns compact listing records with API status, ID, native price/currency, listing_type, and any public SKU/dimensions. A blocked etsy.com webpage is separate from this API response; inspect returned_count and product relevance.',etsy_list_shop_listings:'Read configured shop listings by state, including drafts, for duplicate checks. Page through results.',etsy_get_listing:'Read back one listing in the configured shop; verifies Etsy state, price, shipping profile and partner IDs.',etsy_get_listing_inventory:'Read owner inventory and SKU data for a configured-shop listing. SKU is not Gelato product UID.',etsy_get_listing_images:'Read image metadata for a configured-shop listing.',etsy_get_shipping_profiles:'Read configured Etsy shop shipping profiles and buyer charges.',etsy_get_readiness_states:'Read shop processing/readiness state IDs required for physical draft creation.',etsy_get_production_partners:'Read configured Etsy shop production partner IDs for truthful POD disclosure.',etsy_status:'Check connection',etsy_create_draft:'Create physical listing draft. Creates a new listing on every call; first check for duplicates.',etsy_upload_image:'Upload JPEG or PNG to a listing',etsy_publish_listing:'Activate a listing; incurs Etsy fees. Requires operator opt-in.'})[name],...(['etsy_search_marketplace','etsy_list_shop_listings','etsy_get_listing','etsy_get_listing_inventory','etsy_get_listing_images','etsy_get_shipping_profiles','etsy_get_readiness_states','etsy_get_production_partners'].includes(name) ? {annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:true}} : {})}))};break;
         case 'tools/call':
           try {const data=await serial(()=>tool(m.params?.name,m.params?.arguments || {}));result={content:[{type:'text',text:JSON.stringify(data)}]};}
           catch(e) {result={isError:true,content:[{type:'text',text:e.message}]};} break;
